@@ -1,9 +1,6 @@
-streamlit
-pandas
-numpy
-matplotlib
-plotly
-openpyxl
-requests
-pillow
-GitPython
+streamlit>=1.30
+pandas>=2.0
+plotly>=5.18
+matplotlib>=3.7
+networkx>=3.1
+openpyxl>=3.1
