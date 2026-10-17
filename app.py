@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import io
+import zipfile
 from collections import Counter
 from difflib import SequenceMatcher
 import plotly.express as px
@@ -118,22 +119,17 @@ diccionario_reclamo = [
     "peronchos", "narcotrafico", "narcotráfico", "narcoestado", "sicario", "sicarios", "zona liberada"
 ]
 
-# Diccionario de crimen AMPLIADO
 diccionario_crimen = [
-    # Proceso judicial / investigación
     "justicia", "investigacion", "investigación", "condena", "condenar", "pena", "carcel", "cárcel",
     "prision", "prisión", "perpetua", "cadena perpetua", "fiscal", "fiscalia", "fiscalía", "juez",
     "jueza", "tribunal", "juicio", "allanamiento", "detencion", "detención", "detenido", "detenida",
     "aprehendido", "captura", "profugo", "prófugo", "operativo", "policia", "policía", "gendarmeria",
     "gendarmería", "comisaria", "comisaría", "causa", "expediente", "imputado", "imputada",
-    # Hecho delictivo
     "arma", "armado", "asesina", "asesino", "asesinato", "asesinar", "banda", "crimen", "delincuente",
     "delincuencia", "delincuentes", "femicidio", "fuga", "homicida", "homicidio", "ladrón", "ladrona",
     "ladrones", "mafia", "mafioso", "mafiosos", "muerte", "muerto", "narco", "narcos", "roba", "robó",
     "robo", "sospechoso", "tiroteo", "victima", "víctima", "matar", "mato", "mató", "disparo", "bala",
-    # Familia / víctima
     "familia", "madre", "padre", "hijo", "hija", "dolor", "duelo", "que se haga justicia",
-    # NUEVO: pedidos de justicia y castigo (frases semánticas)
     "preso", "presa", "presos", "presas", "prision preventiva", "reclusion", "reclusión",
     "condenado", "condenada", "condenados", "condenadas",
     "que pague", "que paguen", "que lo agarren", "que lo atrapen",
@@ -157,8 +153,6 @@ diccionario_estigma_tipo_3 = [
     "cabeza de termo"
 ]
 
-# Diccionario IA CORREGIDO: sin " ia " / " ia" / "ia " (rompían palabras como "policia", "justicia")
-# y sin "fake" suelto (matcheaba "fake news", etc.)
 diccionario_imagen_ia = [
     "inteligencia artificial", "es ia", "es una ia", "con ia", "hecho con ia",
     "hecha con ia", "hecho por ia", "hecha por ia", "por la ia", "por ia",
@@ -208,8 +202,6 @@ TONO_SARCASMO_NORM = normalizar_lista(TONO_SARCASMO)
 # -----------------------------------------------------------
 # Esquema de frames
 # -----------------------------------------------------------
-# 0 = Crimen | 1 = Discriminación | 2 = Burla | 3 = Reclamo | 4 = Sospecha IA
-# 5 = Otra categoría (fallback) | 6 = Multimodal/Residual
 FRAME_MAPPING = {
     "crimen": 0,
     "discriminacion": 1,
@@ -226,6 +218,14 @@ FRAME_LABELS = {
     4: "Sospecha IA",
     5: "Otra categoría",
     6: "Multimodal/Residual",
+}
+
+LABEL_A_KEY = {
+    0: "crimen",
+    1: "discriminacion",
+    2: "burla",
+    3: "reclamo",
+    4: "imagen_ia",
 }
 
 # Patrón de emojis
@@ -253,23 +253,17 @@ URL_PATTERN = re.compile(
 
 # STOPWORDS residual
 STOPWORDS_RESIDUAL = {
-    # Risas
     "jaja", "jajaja", "jajajaja", "jajajajaja", "jajaj", "jeje", "jejeje", "jejejeje",
     "jij", "jiji", "lol", "xd", "xdd", "xddd", "jsjs", "jsjsjs",
-    # Interjecciones / reacciones
     "nooo", "noooo", "nooooo", "sii", "siii", "siiii", "nop", "nel",
     "ok", "oki", "okay", "dale", "wow", "uf", "uff", "ay", "epa", "ups", "eh", "ah",
     "hola", "chau", "gracias", "saludos",
-    # Onomatopeyas
     "mmm", "mmmm", "mm", "hmm", "hmmm", "ahh", "ahhh", "ohh", "ohhh",
     "uhh", "uhhh", "ehh", "ehhh", "bah", "puff", "grr",
-    # Vacíos encubiertos
     "nan", "none", "null", "undefined",
 }
 
 def es_multimodal_residual(texto):
-    """Residual: solo emoji/link/marcador, o palabras vacías de contenido,
-    o link-dominante sin texto frameable."""
     if not texto or not str(texto).strip():
         return True
 
@@ -277,7 +271,6 @@ def es_multimodal_residual(texto):
     if texto_str.strip().lower() in {"nan", "none", "null", "n/a", "undefined"}:
         return True
 
-    # Marcadores explícitos
     marcadores = ["[imagen]", "[foto]", "[video]", "[meme]", "[gif]",
                   "[sticker]", "imagen:", "foto:"]
     for m in marcadores:
@@ -290,16 +283,13 @@ def es_multimodal_residual(texto):
     sin_emoji = EMOJI_PATTERN.sub("", sin_url)
     sin_puntuacion = re.sub(r"[\s\W_]+", "", sin_emoji, flags=re.UNICODE)
 
-    # Regla 1: casi no queda texto
     if len(sin_puntuacion) < 3:
         return True
 
-    # Regla 2: solo palabras vacías de contenido
     palabras = re.findall(r"\b\w+\b", sin_emoji.lower(), flags=re.UNICODE)
     if palabras and all(p in STOPWORDS_RESIDUAL for p in palabras):
         return True
 
-    # Regla 3: link-dominante sin texto frameable
     if tiene_url:
         texto_sin_url_norm = normalizar_texto(sin_url)
         matchea_diccionario = False
@@ -320,7 +310,6 @@ def es_multimodal_residual(texto):
 # -----------------------------------------------------------
 
 def procesar_archivo(file):
-    """Devuelve (texto_para_conteo, lista_comentarios, lista_ids)."""
     try:
         if file.name.endswith(('.xlsx', '.xls')):
             return procesar_excel_completo(file)
@@ -336,8 +325,6 @@ def procesar_archivo(file):
         return "", [], []
 
 def _csv_parece_tener_header(df):
-    """Heurística: si algún nombre de columna parece un ID o es muy largo,
-    el archivo NO tiene header real; pandas leyó la primera fila como header."""
     id_pattern = re.compile(r'^[A-Za-z]\d+_\d+$')
     for col in df.columns:
         col_str = str(col)
@@ -348,24 +335,14 @@ def _csv_parece_tener_header(df):
     return True
 
 def procesar_csv(file):
-    """Lee CSV. Si no tiene headers válidos (columnas 'Unnamed' o la primera fila
-    es un comentario), reasigna columnas por posición: A=id, B=comment."""
     raw = file.getvalue()
-
-    # Primer intento: leer con header por defecto
     df = pd.read_csv(io.BytesIO(raw))
-
-    # Si los headers son raros, releer sin header
     if not _csv_parece_tener_header(df):
         df = pd.read_csv(io.BytesIO(raw), header=None)
-
-    # Si las columnas son "Unnamed: X", tratarlas como posicionales
-    # (esto ya se maneja abajo por la detección posicional)
-
-    return _extraer_columnas(df, file.name)
+    # mostrar_mensajes=False para evitar el doble anuncio
+    return _extraer_columnas(df, file.name, mostrar_mensajes=False)
 
 def procesar_txt(file):
-    """TXT con formato ID<TAB>comentario, una entrada por línea."""
     raw = file.getvalue().decode('utf-8', errors='ignore')
     comentarios = []
     ids = []
@@ -404,15 +381,9 @@ def procesar_excel_completo(file):
         return "", [], []
 
 def _extraer_columnas(df, nombre_archivo, mostrar_mensajes=True):
-    """Detecta columna de comentarios e ID.
-    Estrategia:
-      1) Por nombre: 'comment', 'comentario', etc.
-      2) Por posición: si hay ≥2 columnas, asume A=id, B=comment.
-      3) Por contenido: primera columna con texto largo."""
     col_comentarios = None
     col_id = None
 
-    # 1) Detección por nombre
     posibles_comment = ["comment", "Comment", "comments", "Comentario", "comentario",
                         "texto", "Texto", "Comment Text"]
     for c in posibles_comment:
@@ -426,16 +397,13 @@ def _extraer_columnas(df, nombre_archivo, mostrar_mensajes=True):
             col_id = c
             break
 
-    # 2) Detección por posición (caso columnas sin nombre)
     if col_comentarios is None:
         if df.shape[1] >= 2:
-            # Asumimos A=id, B=comment
             col_id = df.columns[0]
             col_comentarios = df.columns[1]
         elif df.shape[1] == 1:
             col_comentarios = df.columns[0]
 
-    # 3) Fallback por contenido
     if col_comentarios is None:
         for c in df.columns:
             if df[c].dtype == object:
@@ -444,7 +412,6 @@ def _extraer_columnas(df, nombre_archivo, mostrar_mensajes=True):
                     col_comentarios = c
                     break
 
-    # 4) Si aún no tenemos ID pero sí comentario, tomar la primera columna distinta
     if col_id is None and col_comentarios is not None and df.shape[1] >= 2:
         for c in df.columns:
             if c != col_comentarios:
@@ -600,6 +567,49 @@ def categorizar_palabras_interactivo(platform_data):
     df_top = pd.DataFrame(top_items, columns=["Palabra", "Frecuencia Total"])
     st.dataframe(df_top, use_container_width=True)
 
+def mostrar_top10_por_categoria(platform_data):
+    """Tarjetas compactas con el top 10 de palabras por categoría."""
+    st.subheader("🏆 Top 10 palabras por categoría")
+    st.caption("Palabras más frecuentes dentro de cada frame (excluye stopwords).")
+
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        st.info("No hay datos cargados.")
+        return
+
+    stopwords = cargar_palabras_vacias()
+    tops_por_cat = {}
+    conteo_por_cat = {}
+
+    for cat_val in FRAME_LABELS.keys():
+        df_cat = df_all[df_all["frame_label"] == cat_val]
+        conteo_por_cat[cat_val] = len(df_cat)
+        if df_cat.empty:
+            tops_por_cat[cat_val] = []
+            continue
+        palabras = []
+        for texto in df_cat["clean_comment"].dropna():
+            palabras.extend(re.findall(r'\b[a-záéíóúñü]+\b', str(texto).lower()))
+        palabras = [p for p in palabras if p not in stopwords and len(p) > 2]
+        tops_por_cat[cat_val] = Counter(palabras).most_common(10)
+
+    cat_keys = list(FRAME_LABELS.keys())
+    for start in range(0, len(cat_keys), 4):
+        cols = st.columns(4)
+        for i, cat_val in enumerate(cat_keys[start:start+4]):
+            with cols[i]:
+                nombre = FRAME_LABELS[cat_val]
+                top = tops_por_cat[cat_val]
+                conteo = conteo_por_cat[cat_val]
+                with st.container(border=True):
+                    st.markdown(f"**{nombre}**  \n<small>{conteo} comentarios</small>", unsafe_allow_html=True)
+                    st.markdown("")
+                    if top:
+                        for palabra, freq in top:
+                            st.markdown(f"<small>• {palabra} <span style='color:gray'>({freq})</span></small>", unsafe_allow_html=True)
+                    else:
+                        st.caption("Sin datos")
+
 def obtener_top20_global(platform_data, top_n=20):
     palabras_agregadas = {}
     for platform, pdata in platform_data.items():
@@ -638,58 +648,6 @@ def grafico2_barras_agrupadas(platform_data):
                  title="Comparación de categorías por plataforma (Frames ACD)")
     return fig
 
-def grafico3_venn_estigmas(platform_data):
-    df = pd.concat([pdata.get("comments_df", pd.DataFrame({"clean_comment": []})) for pdata in platform_data.values()], ignore_index=True)
-    if df.empty: return None
-
-    A_mask = (df.get("frame_label") == 1)
-    B_mask = (df.get("polarizacion") == 2)
-    C_mask = (df.get("tono") == 2)
-
-    A, B, C = int(A_mask.sum()), int(B_mask.sum()), int(C_mask.sum())
-    AB, AC, BC = int((A_mask & B_mask).sum()), int((A_mask & C_mask).sum()), int((B_mask & C_mask).sum())
-    ABC = int((A_mask & B_mask & C_mask).sum())
-
-    onlyA = A - AB - AC + ABC
-    onlyB = B - AB - BC + ABC
-    onlyC = C - AC - BC + ABC
-    onlyAB = AB - ABC
-    onlyAC = AC - ABC
-    onlyBC = BC - ABC
-
-    fig = go.Figure()
-    circles = [
-        {"x": 0.30, "y": 0.5, "r": 0.28, "color": "#06d6a0", "name": "Discriminación"},
-        {"x": 0.70, "y": 0.5, "r": 0.28, "color": "#118ab2", "name": "Polarización explícita"},
-        {"x": 0.50, "y": 0.78, "r": 0.28, "color": "#ffd166", "name": "Tono hostil"}
-    ]
-    for c in circles:
-        fig.add_shape(type="circle", xref="x", yref="y",
-                      x0=c["x"] - c["r"], y0=c["y"] - c["r"],
-                      x1=c["x"] + c["r"], y1=c["y"] + c["r"],
-                      fillcolor=c["color"], opacity=0.35, line_color=c["color"])
-    fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="markers", marker_opacity=0))
-
-    annotations = [
-        {"x": 0.10, "y": 0.5,  "text": str(onlyA)},
-        {"x": 0.90, "y": 0.5,  "text": str(onlyB)},
-        {"x": 0.50, "y": 0.95, "text": str(onlyC)},
-        {"x": 0.5,  "y": 0.5,  "text": str(onlyAB)},
-        {"x": 0.42, "y": 0.62, "text": str(onlyAC)},
-        {"x": 0.6,  "y": 0.62, "text": str(onlyBC)},
-        {"x": 0.5,  "y": 0.57, "text": str(ABC)}
-    ]
-    for ann in annotations:
-        fig.add_annotation(x=ann["x"], y=ann["y"], text=ann["text"], showarrow=False)
-
-    fig.update_xaxes(visible=False, range=[0,1])
-    fig.update_yaxes(visible=False, range=[0,1])
-    fig.update_layout(
-        title="Venn: Discriminación ∩ Polarización explícita ∩ Tono hostil",
-        showlegend=False, margin=dict(t=60,b=20)
-    )
-    return fig
-
 def grafico4_torta_frames(platform_data):
     df = pd.concat([pdata.get("comments_df", pd.DataFrame({"clean_comment": []})) for pdata in platform_data.values()], ignore_index=True)
     if df.empty: return None
@@ -698,21 +656,6 @@ def grafico4_torta_frames(platform_data):
     df_chart = df_chart[df_chart["Frecuencia"] > 0]
     fig = px.pie(df_chart, names="Categoria", values="Frecuencia", title="Distribución general de Frames (ACD)")
     fig.update_traces(textposition='inside', textinfo='percent+label')
-    return fig
-
-def grafico5_acd_macros(platform_data, dic_polar, dic_gener, dic_desh, dic_leg):
-    df = pd.concat([pdata.get("comments_df", pd.DataFrame({"clean_comment": []})) for pdata in platform_data.values()], ignore_index=True)
-    if df.empty: return None
-    def contiene(df_local, lista):
-        if not lista: return 0
-        pattern = "|".join([re.escape(x) for x in lista])
-        return int(df_local["clean_comment"].str.contains(pattern, case=False, regex=True).sum())
-    data = {
-        "Polarización": contiene(df, dic_polar), "Generalización": contiene(df, dic_gener),
-        "Deshumanización": contiene(df, dic_desh), "Legitimación": contiene(df, dic_leg)
-    }
-    df_chart = pd.DataFrame({"Categoria": list(data.keys()), "Frecuencia": list(data.values())})
-    fig = px.bar(df_chart, x="Categoria", y="Frecuencia", title="Frecuencia de macro-mecanismos discursivos")
     return fig
 
 def calcular_coocurrencia(df_comments, top_palabras):
@@ -753,20 +696,422 @@ def grafico6_red_coocurrencia(platform_data, top_n=30, umbral=2):
     fig = go.Figure(data=[edge_trace, node_trace], layout=go.Layout(title=f'Red Semántica de Co-ocurrencia (Top {top_n} palabras)', showlegend=False, hovermode='closest', margin=dict(b=20, l=5, r=5, t=40), xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), plot_bgcolor='rgba(0,0,0,0)'))
     return fig
 
+# -----------------------------------------------------------
+# NUEVAS FUNCIONES PARA EXPORTACIÓN AVANZADA
+# -----------------------------------------------------------
+
+def extraer_post_desde_id(id_str):
+    if not id_str:
+        return ""
+    s = str(id_str).strip()
+    if "_" in s:
+        return s.split("_")[0]
+    return ""
+
+def clasificar_tipo_residual(texto):
+    if not texto or not str(texto).strip():
+        return "vacío"
+    if str(texto).strip().lower() in {"nan", "none", "null", "n/a", "undefined"}:
+        return "vacío"
+
+    texto_str = str(texto)
+    texto_lower = texto_str.lower()
+    marcadores = ["[imagen]", "[foto]", "[video]", "[meme]", "[gif]", "[sticker]", "imagen:", "foto:"]
+    for m in marcadores:
+        if m in texto_lower:
+            return "marcador_multimedia"
+
+    tiene_url = bool(URL_PATTERN.search(texto_str))
+    tiene_emoji = bool(EMOJI_PATTERN.search(texto_str))
+
+    sin_url = URL_PATTERN.sub("", texto_str)
+    sin_emoji = EMOJI_PATTERN.sub("", sin_url)
+    sin_puntuacion = re.sub(r"[\s\W_]+", "", sin_emoji, flags=re.UNICODE)
+
+    if len(sin_puntuacion) < 3:
+        if tiene_emoji and tiene_url:
+            return "emoji_y_link"
+        if tiene_emoji:
+            return "solo_emoji"
+        if tiene_url:
+            return "solo_link"
+        return "otro"
+
+    palabras = re.findall(r"\b\w+\b", sin_emoji.lower(), flags=re.UNICODE)
+    if palabras and all(p in STOPWORDS_RESIDUAL for p in palabras):
+        return "risa_sin_contexto"
+
+    if tiene_url:
+        return "link_dominante"
+
+    return "otro"
+
+def contar_matcheos(texto):
+    if not texto or not str(texto).strip():
+        return None
+    if es_multimodal_residual(texto):
+        return None
+
+    texto_norm = normalizar_texto(str(texto))
+    matches = {}
+    for categoria, palabras_dict in DICT_FRAMES_NORM.items():
+        matches[categoria] = []
+        for p in palabras_dict:
+            if p and p in texto_norm:
+                matches[categoria].append(p)
+    return matches
+
+def _unir_dataframes(platform_data):
+    dfs = []
+    for plat, pdata in platform_data.items():
+        df = pdata.get("comments_df", pd.DataFrame())
+        if not df.empty:
+            df = df.copy()
+            df["platform"] = plat
+            dfs.append(df)
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True)
+
+def construir_dataset_maestro(platform_data):
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        return pd.DataFrame()
+
+    return pd.DataFrame({
+        "id": df_all["id"],
+        "platform": df_all["platform"],
+        "post": df_all["id"].apply(extraer_post_desde_id),
+        "comment": df_all["comment"],
+        "clean_comment": df_all["clean_comment"],
+        "frame_label": df_all["frame_label"],
+        "frame_nombre": df_all["frame_label"].map(FRAME_LABELS),
+        "longitud": df_all["clean_comment"].astype(str).str.len(),
+    })
+
+def construir_metricas_reframing(platform_data):
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        return pd.DataFrame()
+
+    def calcular(df, nombre):
+        total = len(df)
+        crimen = int((df["frame_label"] == 0).sum())
+        reframing = total - crimen
+        indice = (reframing / total * 100) if total > 0 else 0
+
+        alternativos = df[~df["frame_label"].isin([0, 6])]["frame_label"]
+        if not alternativos.empty:
+            top = alternativos.mode().iloc[0]
+            frame_dom = FRAME_LABELS.get(int(top), "")
+        else:
+            frame_dom = ""
+
+        return {
+            "nivel": nombre,
+            "total": total,
+            "crimen": crimen,
+            "reframing": reframing,
+            "indice_reframing_pct": round(indice, 1),
+            "frame_alternativo_dominante": frame_dom,
+        }
+
+    filas = [calcular(df_all, "Global")]
+    for plat in sorted(platform_data.keys()):
+        df_p = df_all[df_all["platform"] == plat]
+        if not df_p.empty:
+            filas.append(calcular(df_p, plat.capitalize()))
+
+    return pd.DataFrame(filas)
+
+def construir_resumen_categorias(platform_data):
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        return pd.DataFrame()
+
+    total = len(df_all)
+    stopwords = cargar_palabras_vacias()
+
+    filas = []
+    for cat_val, cat_nombre in FRAME_LABELS.items():
+        df_cat = df_all[df_all["frame_label"] == cat_val]
+        conteo = len(df_cat)
+
+        if conteo == 0:
+            filas.append({
+                "frame_label": cat_val,
+                "frame_nombre": cat_nombre,
+                "conteo": 0,
+                "porcentaje": 0.0,
+                "top_palabras": "",
+                "top_bigramas": "",
+                "ejemplos_ids": "",
+            })
+            continue
+
+        porcentaje = round(conteo / total * 100, 1)
+
+        palabras = []
+        for texto in df_cat["clean_comment"].dropna():
+            palabras.extend(re.findall(r'\b[a-záéíóúñü]+\b', str(texto).lower()))
+        palabras = [p for p in palabras if p not in stopwords and len(p) > 2]
+        top_palabras = Counter(palabras).most_common(20)
+        top_palabras_str = "; ".join(f"{p} ({c})" for p, c in top_palabras)
+
+        bigramas = Counter()
+        for texto in df_cat["clean_comment"].dropna():
+            palabras_t = re.findall(r'\b[a-záéíóúñü]+\b', str(texto).lower())
+            palabras_t = [p for p in palabras_t if p not in stopwords and len(p) > 2]
+            for i in range(len(palabras_t) - 1):
+                bigramas[f"{palabras_t[i]} {palabras_t[i+1]}"] += 1
+        top_bigramas = bigramas.most_common(10)
+        top_bigramas_str = "; ".join(f"{b} ({c})" for b, c in top_bigramas)
+
+        ids_ejemplo = df_cat["id"].head(15).tolist()
+        ids_str = "; ".join(str(i) for i in ids_ejemplo if i)
+
+        filas.append({
+            "frame_label": cat_val,
+            "frame_nombre": cat_nombre,
+            "conteo": conteo,
+            "porcentaje": porcentaje,
+            "top_palabras": top_palabras_str,
+            "top_bigramas": top_bigramas_str,
+            "ejemplos_ids": ids_str,
+        })
+
+    return pd.DataFrame(filas)
+
+def construir_reframing_por_post(platform_data):
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        return pd.DataFrame()
+
+    df_all["post"] = df_all["id"].apply(extraer_post_desde_id)
+    df_all = df_all[df_all["post"] != ""]
+    if df_all.empty:
+        return pd.DataFrame()
+
+    filas = []
+    for (plat, post), grupo in df_all.groupby(["platform", "post"]):
+        total = len(grupo)
+        crimen = int((grupo["frame_label"] == 0).sum())
+        reframing = total - crimen
+        crimen_pct = round(crimen / total * 100, 1) if total > 0 else 0
+        reframing_pct = round(reframing / total * 100, 1) if total > 0 else 0
+
+        alternativos = grupo[~grupo["frame_label"].isin([0, 6])]["frame_label"]
+        frame_alt = ""
+        if not alternativos.empty:
+            top = alternativos.mode().iloc[0]
+            frame_alt = FRAME_LABELS.get(int(top), "")
+
+        filas.append({
+            "post": post,
+            "plataforma": plat.capitalize(),
+            "total": total,
+            "crimen_pct": crimen_pct,
+            "reframing_pct": reframing_pct,
+            "frame_alternativo_dominante": frame_alt,
+        })
+
+    df_out = pd.DataFrame(filas).sort_values("reframing_pct", ascending=False).reset_index(drop=True)
+    return df_out
+
+def construir_fronterizos(platform_data):
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        return pd.DataFrame()
+
+    df_front = df_all[df_all["frame_label"] == 5].copy()
+    if df_front.empty:
+        return pd.DataFrame()
+
+    return pd.DataFrame({
+        "id": df_front["id"],
+        "platform": df_front["platform"],
+        "post": df_front["id"].apply(extraer_post_desde_id),
+        "comment": df_front["comment"],
+    })
+
+def construir_residuales(platform_data):
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        return pd.DataFrame()
+
+    df_res = df_all[df_all["frame_label"] == 6].copy()
+    if df_res.empty:
+        return pd.DataFrame()
+
+    return pd.DataFrame({
+        "id": df_res["id"],
+        "platform": df_res["platform"],
+        "post": df_res["id"].apply(extraer_post_desde_id),
+        "comment": df_res["comment"],
+        "tipo_residual": df_res["comment"].apply(clasificar_tipo_residual),
+    })
+
+def construir_prototipicos(platform_data, top_n_por_cat=20):
+    df_all = _unir_dataframes(platform_data)
+    if df_all.empty:
+        return pd.DataFrame()
+
+    df_valid = df_all[~df_all["frame_label"].isin([5, 6])].copy()
+    if df_valid.empty:
+        return pd.DataFrame()
+
+    filas = []
+    for _, row in df_valid.iterrows():
+        cat = int(row["frame_label"])
+        key = LABEL_A_KEY.get(cat)
+        if not key:
+            continue
+        matches = contar_matcheos(row["clean_comment"])
+        if matches is None:
+            continue
+        palabras = matches.get(key, [])
+        filas.append({
+            "id": row["id"],
+            "platform": row["platform"],
+            "post": extraer_post_desde_id(row["id"]),
+            "comment": row["comment"],
+            "frame_label": cat,
+            "frame_nombre": FRAME_LABELS.get(cat, ""),
+            "n_matcheos": len(palabras),
+            "palabras_matcheadas": "; ".join(palabras),
+        })
+
+    df_out = pd.DataFrame(filas)
+    if df_out.empty:
+        return df_out
+
+    top_rows = []
+    for cat in sorted(df_out["frame_label"].unique()):
+        sub = df_out[df_out["frame_label"] == cat].sort_values(
+            "n_matcheos", ascending=False
+        ).head(top_n_por_cat)
+        top_rows.append(sub)
+
+    return pd.concat(top_rows, ignore_index=True)
+
+def empaquetar_zip(archivos_dict):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for nombre, df in archivos_dict.items():
+            if df is None or df.empty:
+                continue
+            csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+            zf.writestr(nombre, csv_bytes)
+    buffer.seek(0)
+    return buffer
+
+def construir_excel(archivos_dict):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for nombre, df in archivos_dict.items():
+            if df is None or df.empty:
+                continue
+            sheet_name = nombre.replace(".csv", "")[:31]
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    buffer.seek(0)
+    return buffer
+
 def export_results(platform_data):
     st.header("📥 Exportar Resultados")
-    for name, pdata in platform_data.items():
-        df_res = pd.DataFrame([{'Palabra': k, 'Frecuencia': v['total'], 'Variantes': ", ".join(v['variantes'].keys())} for k, v in pdata.get('resultados', {}).items()])
-        comments_df = pdata.get('comments_df')
-        col1, col2 = st.columns(2)
-        with col1:
-            if not df_res.empty:
-                csv = df_res.to_csv(index=False).encode('utf-8')
-                st.download_button(f"Descargar CSV - {name}", csv, file_name=f"analisis_{name}.csv", mime="text/csv")
-        with col2:
-            if comments_df is not None and not comments_df.empty:
-                csv = comments_df.to_csv(index=False).encode('utf-8')
-                st.download_button(f"Descargar Comentarios - {name}", csv, file_name=f"comentarios_etiquetas_{name}.csv", mime="text/csv")
+
+    if not platform_data:
+        st.info("No hay datos para exportar.")
+        return
+
+    metricas_df = construir_metricas_reframing(platform_data)
+    dataset_df = construir_dataset_maestro(platform_data)
+    resumen_df = construir_resumen_categorias(platform_data)
+    por_post_df = construir_reframing_por_post(platform_data)
+    fronterizos_df = construir_fronterizos(platform_data)
+    residuales_df = construir_residuales(platform_data)
+    prototipicos_df = construir_prototipicos(platform_data)
+
+    if not metricas_df.empty:
+        st.subheader("📊 Métricas de reframing")
+        st.caption(
+            "Índice de reframing = (total − crimen) / total. "
+            "Mide qué proporción de comentarios desplazó el foco del hecho delictivo "
+            "hacia otro frame (discriminación, burla, reclamo, etc.)."
+        )
+        fila_global = metricas_df[metricas_df["nivel"] == "Global"]
+        if not fila_global.empty:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Total comentarios", int(fila_global["total"].iloc[0]))
+            with c2:
+                st.metric("Crimen (frame esperado)", int(fila_global["crimen"].iloc[0]))
+            with c3:
+                st.metric("Reframing", int(fila_global["reframing"].iloc[0]))
+            with c4:
+                st.metric("Índice de reframing", f"{fila_global['indice_reframing_pct'].iloc[0]}%")
+        st.dataframe(metricas_df, use_container_width=True)
+
+    archivos = {
+        "metricas_reframing.csv": metricas_df,
+        "comentarios_completo.csv": dataset_df,
+        "resumen_categorias.csv": resumen_df,
+        "reframing_por_post.csv": por_post_df,
+        "fronterizos.csv": fronterizos_df,
+        "residuales.csv": residuales_df,
+        "prototipicos.csv": prototipicos_df,
+    }
+
+    st.markdown("---")
+    st.subheader("⬇️ Descargar todo")
+    col_zip, col_excel = st.columns(2)
+
+    with col_zip:
+        try:
+            zip_buf = empaquetar_zip(archivos)
+            st.download_button(
+                "📦 Descargar TODO (ZIP con los CSVs)",
+                data=zip_buf,
+                file_name="resultados_analisis.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="dl_zip_todo",
+            )
+        except Exception as e:
+            st.error(f"Error armando ZIP: {e}")
+
+    with col_excel:
+        try:
+            excel_buf = construir_excel(archivos)
+            st.download_button(
+                "📗 Descargar TODO (Excel consolidado)",
+                data=excel_buf,
+                file_name="resultados_analisis.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="dl_excel_todo",
+            )
+        except Exception as e:
+            st.error(f"Error armando Excel: {e}")
+
+    st.markdown("---")
+    st.subheader("⬇️ Descargas individuales")
+    columnas = st.columns(3)
+    for i, (nombre, df) in enumerate(archivos.items()):
+        if df is None or df.empty:
+            continue
+        with columnas[i % 3]:
+            try:
+                csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    f"⬇️ {nombre}",
+                    data=csv_bytes,
+                    file_name=nombre,
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"dl_{nombre}",
+                )
+            except Exception as e:
+                st.error(f"Error en {nombre}: {e}")
 
 # -----------------------------------------------------------
 # Panel de revisión manual con emojis
@@ -911,6 +1256,9 @@ def main():
             st.info("No hay suficientes datos para mostrar el Top20.")
 
         st.markdown("---")
+        mostrar_top10_por_categoria(st.session_state.platform_data)
+
+        st.markdown("---")
         categorizar_palabras_interactivo(st.session_state.platform_data)
 
         st.markdown("---")
@@ -924,19 +1272,6 @@ def main():
         with col2:
             fig4 = grafico4_torta_frames(st.session_state.platform_data)
             if fig4: st.plotly_chart(fig4, use_container_width=True)
-
-        st.markdown("---")
-        col3, col4 = st.columns([1,1])
-        with col3:
-            fig3 = grafico3_venn_estigmas(st.session_state.platform_data)
-            if fig3: st.plotly_chart(fig3, use_container_width=True)
-            else: st.info("No hay datos para el diagrama de Venn.")
-        with col4:
-            st.subheader("📌 Macro-mecanismos discursivos")
-            dic_polar = POLARIZACION_EXPLICITA + POLARIZACION_IMPLICITA
-            fig5 = grafico5_acd_macros(st.session_state.platform_data, dic_polar, [], [], [])
-            if fig5: st.plotly_chart(fig5, use_container_width=True)
-            else: st.info("No hay datos para los macro-mecanismos.")
 
         st.markdown("---")
         st.header("🕸️ Red Semántica (¿Qué palabras se asocian entre sí?)")
